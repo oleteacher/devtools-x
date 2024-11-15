@@ -35,81 +35,109 @@ export default function Image2() {
     conv: "0",
   });
 
-  const selectImage = () => {
-    console.debug("selecting image");
-    open({
-      multiple: false,
-      title: "Select an Image",
-      directory: false,
-    })
-      .then(async (p) => {
-        if (!p) return; // no path
-
-        let path = p as string;
-        const sizeInBytes =
-          (await (await (await fetch(convertFileSrc(path))).blob()).size) /
-          1024;
-
-        setSizes({
-          og: sizeInBytes.toFixed(2),
-          conv: "0",
-        });
-        setImageSrc(path);
-      })
-      .catch((e) => {
-        console.debug("Something went wrong, while selecting image", e);
+  const selectImage = async () => {
+    try {
+      console.debug("selecting image");
+      const p = await open({
+        multiple: false,
+        title: "Select an Image",
+        directory: false,
       });
+
+      if (!p) return;
+
+      const path = p as string;
+      const assetUrl = convertFileSrc(path);
+      const response = await fetch(assetUrl);
+      const blob = await response.blob();
+      const sizeInBytes = blob.size / 1024;
+
+      setSizes({
+        og: sizeInBytes.toFixed(2),
+        conv: "0",
+      });
+      setImageSrc(path);
+    } catch (e) {
+      console.error("Error selecting image:", e);
+    }
   };
 
   const resize = async () => {
     if (!imageSrc) return;
     console.log("resize", imageSrc);
 
-    setLoading(true);
-    console.time("resize");
-    invoke<any>("compress_images_to_buffer", {
-      imagePath: imageSrc,
-      quality: quality,
-      format: imageType,
-    })
-      .then((buff) => {
-        const blob = new Blob([new Uint8Array(buff)], {
-          type: "image/jpeg",
-        });
-        const url = URL.createObjectURL(blob);
-        console.timeEnd("resize");
-        setSizes({
-          ...sizes,
-          conv: (blob.size / 1024).toFixed(2),
-        });
-        setLoading(false);
-        setConverted(url);
-      })
-      .catch((e) => {
-        setLoading(false);
-        console.error("Error while resizing image", e);
-        console.timeEnd("resize");
+    try {
+      setLoading(true);
+      console.time("resize");
+	  
+	  await new Promise(resolve => setTimeout(resolve, 100));
+
+      const buff = await invoke<number[]>("compress_images_to_buffer", {
+        imagePath: imageSrc,
+        quality: quality,
+        format: imageType,
       });
+
+      const blob = new Blob([new Uint8Array(buff)], {
+	  type: `image/${imageType.toLowerCase()}`,
+	});
+
+      // Clean up previous URL if it exists
+      if (converted) {
+        URL.revokeObjectURL(converted);
+      }
+
+      const url = URL.createObjectURL(blob);
+      console.timeEnd("resize");
+
+      setSizes(prev => ({
+        ...prev,
+        conv: (blob.size / 1024).toFixed(2),
+      }));
+      setConverted(url);
+    } catch (e) {
+      console.error("Error while resizing image:", e);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const download = async () => {
     if (!converted) return;
-    const downloadPath = await save({
-      defaultPath: `compressed.${quality}.${imageType.toLowerCase()}`,
-      filters: [{ name: "images", extensions: [imageType.toLowerCase()] }],
-      title: "Select location",
-    });
+    try {
+      const downloadPath = await save({
+        defaultPath: `compressed.${quality}.${imageType.toLowerCase()}`,
+        filters: [{ name: "images", extensions: [imageType.toLowerCase()] }],
+        title: "Select location",
+      });
 
-    if (!downloadPath) return;
+      if (!downloadPath) return;
 
-    const blob = await fetch(converted).then((x) => x.blob());
-
-    const buffer = await blob.arrayBuffer();
-    writeFile(downloadPath, new Uint8Array(buffer));
+      const response = await fetch(converted);
+      const blob = await response.blob();
+      const buffer = await blob.arrayBuffer();
+      await writeFile(downloadPath, new Uint8Array(buffer));
+    } catch (e) {
+      console.error("Error saving file:", e);
+    }
   };
 
   useEffect(() => {
-    resize();
+    let mounted = true;
+
+    const performResize = async () => {
+      if (!imageSrc || !mounted) return;
+      await resize();
+    };
+
+    performResize();
+
+    return () => {
+      mounted = false;
+      if (converted) {
+        URL.revokeObjectURL(converted);
+      }
+    };
   }, [imageSrc, doubouncedQuality, imageType]);
 
   return (
@@ -119,14 +147,16 @@ export default function Image2() {
         overflow: "auto",
       }}
     >
-      <Group align={"center"} justify="center">
+      <Group align="center" justify="center">
         <Button onClick={selectImage}>Select image</Button>
-        {converted ? <Button onClick={download}>Save</Button> : null}
+        {converted && <Button onClick={download}>Save</Button>}
       </Group>
+
       <LoadingOverlay
         visible={loading}
         overlayProps={{ radius: "sm", blur: 2 }}
       />
+
       {converted && (
         <Box>
           <ReactCompareSlider
@@ -142,7 +172,7 @@ export default function Image2() {
                   objectFit: "contain",
                 }}
                 src={convertFileSrc(imageSrc)}
-                alt="Left"
+                alt="Original"
               />
             }
             itemTwo={
@@ -151,16 +181,17 @@ export default function Image2() {
                   objectFit: "contain",
                 }}
                 src={converted}
-                alt="Right"
+                alt="Converted"
               />
             }
           />
         </Box>
       )}
-      {converted ? (
+
+      {converted && (
         <Box style={{ position: "relative" }}>
           <Stack
-            align={"left"}
+            align="left"
             gap="sm"
             style={{
               position: "absolute",
@@ -175,42 +206,35 @@ export default function Image2() {
             <NativeSelect
               value={imageType}
               data={["Jpeg", "Png", "Webp"]}
-              onChange={(e) => {
-                setImageType(e.currentTarget.value as ImageType);
-              }}
-            ></NativeSelect>
+              onChange={(e) => setImageType(e.currentTarget.value as ImageType)}
+            />
             <Divider />
-
             <Slider
               min={0}
               max={100}
               value={quality}
-              onChange={(e) => {
-                setQuality(e);
-              }}
-              label={quality + "%"}
-              aria-label="slider-ex-1"
+              onChange={setQuality}
+              label={`${quality}%`}
+              aria-label="Quality slider"
               labelTransitionProps={{
                 transition: "skew-down",
                 duration: 150,
                 timingFunction: "ease",
               }}
-            ></Slider>
+            />
             <Box>
-              <Text c={"blue"}>Original: {sizes.og}kb</Text>{" "}
+              <Text c="blue">Original: {sizes.og}kb</Text>
               <Text c={Number(sizes.conv) > Number(sizes.og) ? "red" : "green"}>
                 Converted: {sizes.conv}kb
               </Text>
             </Box>
           </Stack>
-          {converted && (
-            <Text c={"dimmed"} size="xs">
-              NOTE: Large images may take a while to load, instead try
-              squoosh.app/
-            </Text>
-          )}
+          <Text c="dimmed" size="xs">
+            NOTE: Large images may take a while to load, instead try
+            squoosh.app/
+          </Text>
         </Box>
-      ) : null}
+      )}
     </Stack>
   );
 }
